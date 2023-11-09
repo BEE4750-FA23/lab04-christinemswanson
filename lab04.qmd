@@ -1,0 +1,229 @@
+---
+title: "BEE 4750 Lab 4: Simulation-Optimization"
+format:
+    html:        
+        warning: true
+        error: true
+        mermaid:
+            theme: forest
+    ipynb:
+        warning: true
+        error: true
+        code-annotation: below
+jupyter: julia-1.9
+format-links: []
+---
+
+::: {.content-visible when-format="ipynb"}
+**Name**:
+
+**ID**:
+:::
+
+::: {.callout-important icon="false"}
+### Due Date
+
+Friday, 11/17/23, 9:00pm
+:::
+
+::: {.content-visible when-format="html"}
+::: callout-caution
+If you are enrolled in the course, make sure that you use the GitHub Classroom link provided in Ed Discussion, or you may not be able to get help if you run into problems.
+
+Otherwise, you can [find the Github repository here](https://github.com/BEE4750/lab04).
+:::
+:::
+
+## Setup
+
+The following code should go at the top of most Julia scripts; it will load the local package environment and install any needed packages. You will see this often and shouldn't need to touch it.
+
+```{julia}
+#| output: false
+
+import Pkg
+Pkg.activate(".")
+Pkg.instantiate()
+```
+
+```{julia}
+#| output: false
+
+using Random # for random seeds
+using Distributions # statistical distribution interface
+using Roots # find zeros of functions
+using Metaheuristics # search algorithms
+using Plots # plotting
+```
+
+::: {.cell .markdown}
+## Overview
+
+In this lab, you will experiment with simulation-optimization with the shallow lake problem. The goal of this experimentation is to get an understanding of how to work with simulation-optimization methods and the impact of some choices involved in using these methods.
+
+Free free to delete some of the illustrative cells and code blocks in your notebook as you go through and solve the lab problems...this might help reduce some potential confusion while grading about what your answer is.
+:::
+
+::: {.cell .markdown}
+## Introduction
+
+Due to ongoing economic activity, a town emits phosphorous into a shallow lake (with a concentration of $a_t$), which also receives non-point source runoff (concentration $y_t$) from the surrounding area. The concentration of the lake at time $t+1$ is given by
+$$X_{t+1} = X_t + a_t + y_t + \frac{X_t^q}{1+X_t^q} - bX_t,$$
+
+where:
+
+| Parameter | Value |
+| :------: | :------ |
+| $a_t$ | point-source phosphorous concentration from the town |
+| $y_t$ | non-point-source phosphorous concentration |
+| $q$ | rate at which phosphorous is recycled from sediment |
+| $b$| rate at which phosphorous leaves the lake |
+
+and $X_0 = 0$, $y_t \sim LogNormal(\log(0.03), 0.25)$, $q=2.5$, and $b=0.4$.
+
+The goal of the optimization is to maximize the town's average phosphorous concentration releases (as a proxy of economic activity): $\max \sum_{t=1}^T a_t / T$ over a 100-year period. We have decided (initially) that an acceptable solution is one which will result in the lake eutrophying no more than 10% of the time.
+
+The non-point source samples can be sampled using the following code block:
+:::
+```{julia}
+Random.seed!(1)
+
+T = 100 # length of simualtion
+n_samples = 1_000 # replace with number of samples if you experiment
+
+P_distribution = LogNormal(log(0.03), 0.25)
+y = rand(P_distribution, (T, n_samples)) # sample a T x n_samples matrix
+```
+
+We write the lake model as a function:
+
+```{julia}
+# lake function model
+# inputs:
+#   a: vector of point-source releases (to be optimized)
+#   y: randomly-sampled non-point sources
+#   q: lake phosphorous recycling rate
+#   b: phosphorous outflow rate
+# 
+# returns:
+#   series of lake phosphorous concentrations
+function lake(a, y, q, b, T)
+    X = zeros(T+1, size(y, 2))
+    # calculate states
+    for t = 1:T
+        X[t+1, :] = X[t, :] .+ a[t] .+ y[t, :] .+ (X[t, :].^q./(1 .+ X[t, :].^q)) .- b.*X[t, :]
+    end
+    return X
+end
+```
+
+::: {.cell .markdown}
+However, this isn't sufficient on its own! `Metaheuristics.jl` (and most simulation-optimization packages) require the use of a *wrapper* function, which accepts as inputs both parameters to be optimized (in this case, point-source releases `a`) and parameters which will be fixed (the others; see below for how to incorporate these into the syntax) and returns the required information for the optimization procedure.
+
+`Metaheuristics.jl` wants its optimizing wrapper function to return (in order):
+
+* the objective(s) (in this case, the mean of `a`, $\sum_t a_t / T$), 
+* a vector of the degrees to which the solution fails to achieve any inequality constraints (positive values indicate a larger failure, values below zero are considered acceptable)
+* a vector of the degrees to which the solution fails to achieve any equality constraints (only values of zero indicate success), which in this case is not relevant, so we just return `[0.0]`.
+
+:::
+
+```{julia}
+# function producing optimization outputs
+# inputs:
+#   a: vector of point-source releases (to be optimized)
+#   y: randomly-sampled non-point sources
+#   q: lake phosphorous recycling rate
+#   b: phosphorous outflow rate
+# 
+# returns:
+#   - objective: mean value of point-source releases
+#   - inequality constraint failure vector
+#   - equality constraint failure vector (in this case, always [0.0])
+function lake_opt(a, y, q, b, T, Xcrit)
+    X = lake(a, y, q, b, T)
+    # calculate exceedance of critical value
+    Pexceed = sum(X[T+1, :] .> Xcrit) / size(X, 2)
+    failconst = [Pexceed - 0.1] # replace 0.1 if you experiment with the failure probability
+    return mean(a), failconst, [0.0]
+end
+```
+
+::: {.cell .markdown}
+To optimize using DE (differential evolution), use the following syntax:
+
+```julia
+results = optimize(f, bounds, DE(options=Options(f_calls_limit=max_evals)))
+```
+
+where `bounds` is a `Matrix` of lower bounds (first row) and upper bounds (last row), and `max_evals` is an integer for the maximum number of evaluations. 
+
+* For example, to set bounds for all decision variables between 0 and 0.5, you can use 
+```julia
+bounds = [zeros(T) 0.5ones(T)]'
+```
+* Increasing `max_evals` can help you find a better solution, but at a larger computational expense.
+* You can use an anonymous function to fix values for non-optimized parameters, *e.g.*
+```julia
+y = ...
+q = ...
+b = ...
+T = ...
+Xcrit = ...
+results = optimize(a -> lake_opt(a, y, q, b, t, Xcrit), bounds, DE(options=Options(f_calls_limit=max_evals)))
+```
+
+
+Then to get the approximated minimum value:
+
+```julia
+fx = minimum(result)
+```
+
+and the approximated minimizing value:
+
+```julia
+x = minimizer(result)
+```
+
+The last piece is to get the critical value (to identify failures), which we can do using `Roots.jl`, which finds zeros of functions:
+:::
+
+```{julia}
+# define a function whose zeros are the critical values
+P_flux(x) = (x^q/(1+x^q)) - b*x
+# use Roots.find_zero() to find the non-eutrophication and non-zero critical value; we know from visual inspection in class that this is bounded between 0.1 and 1.5.
+Xcrit = find_zero(P_flux, (0.1, 1.5))
+```
+
+
+## Problems
+
+### Problem 1 (2 points)
+
+Using the default setup above, find the approximate optimum value. What is the value of the objective function, and how many failures (you can evaluate the `lake` function using your solution to find how many end-values are above the critical value).
+
+### Problem 2 (5 points)
+
+::: {.cell .markdown}
+Feel free to experiment with some of the degrees of freedom in finding the optimum value. For example:
+
+* What failure probability are you using to characterize acceptable solutions?
+* How many Monte Carlo samples are you using?
+* What bounds are you searching over for the releases?
+* How many function evaluations are you using for the search?
+* What is the impact of different [`Metaheuristics.jl` algorithms](https://docs.juliahub.com/Metaheuristics/aJ70z/3.2.12/algorithms/)?
+
+Note that you might want to modify some of these together: for example, lower acceptable failure probabilities often require more function evaluations to find acceptable values, and more Monte Carlo samples increase computational expense, so fewer function evaluations may be completed in the same time.
+
+Provide a description of what you've modified and why. What was the new solution that you found? Does it satisfy the constraints?
+:::
+
+### Problem 3 (3 points)
+
+What did you learn about the use of these methods? Compare with your experience with linear programming from earlier in the semester.
+
+
+## References
+
+Put any consulted sources here, including classmates you worked with/who helped you.

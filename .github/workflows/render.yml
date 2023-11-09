@@ -1,0 +1,57 @@
+on:
+  workflow_dispatch:
+  push:
+    branches: 
+      - main
+      - Fall23
+    paths-ignore:
+      - '**/README.md'
+      - '**.ipynb'
+
+name: Quarto Publish
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Set up Quarto
+        uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          version: pre-release
+          tinytex: true
+        
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+          
+      - name: Install Jupyter
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install jupyter
+
+      - name: Install Julia
+        uses: julia-actions/setup-julia@v1
+        with:
+          version: 1.9
+
+      - name: Install IJulia
+        run: julia -e 'using Pkg; Pkg.activate("."); Pkg.instantiate(); Pkg.add("IJulia"); Pkg.build("IJulia")'
+
+      - name: Render Notebook
+        uses: quarto-dev/quarto-actions/render@v2
+        with:
+          to: ipynb
+          path: lab03.qmd
+
+      - name: Commit and Push
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          file_pattern: '*.ipynb'
+          commit_message: "Build notebook from ${{ github.sha }}"
+  
